@@ -1,0 +1,16 @@
+Multi_fit.inp:
+#Will fit data from a multiple residues to the Carver-Richards Equation and
+#compare the fit when fitting each residue separately to the fit when all are
+#fit together
+D_FILE 1 1 1 ./Res77_10d_900.dat 77 900 10 N
+D_FILE 2 1 1 ./Res77_10d_600.dat 77 600 10 N
+D_FILE 3 2 2 ./Res113_10d_900.dat 113 900 10 N
+D_FILE 4 2 2 ./Res113_10d_600.dat 113 600 10 N
+
+OPTION COMPARE_MODEL_FIT
+OPTION FIT_GROUPS_SEPARATE
+OPTION WEIGHTS 1
+
+O_FILE ./77_113_10d.out
+P_FILE ./77_113_10d.eps -norm
+

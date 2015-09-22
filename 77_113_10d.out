@@ -1,0 +1,96 @@
+Global Fit vs. Inidividual Fits
+------------------------------------------------------------
+F-test suggests inidividual fits are likely better: P-value 9.91251e-09
+AIC suggests inidividual fits are likely better: 
+AIC Inidividual: -38.525191	Global: 5.373677	 Relative Likelihood: 2.93415e-10 
+
+
+Group 1 Carver-Richards Fit Converged after 12 iterations
+Group 2 Carver-Richards Fit Converged after 11 iterations
+data points 40		 model parameters 10 
+CR r^2 0.996700		chi^2 7.660632		SD 0.398784		AIC -38.525191
+------------------------------------------------------------
+PAR_CR   PA		1     95.85  +/-  0.645
+PAR_CR   PA		2     99.19  +/-  0.074
+PAR_CR   kex	1  2586.50  +/- 223.062 Hz
+PAR_CR   kex	2   855.28  +/- 93.592 Hz
+PAR_CR   dw		1      2.99  +/-  0.253 ppm
+PAR_CR   dw		2      1.69  +/-  0.128 ppm
+PAR_CR   R20	1    -5.29  +/-  0.972 Hz
+PAR_CR   R20	2    -2.38  +/-  0.462 Hz
+PAR_CR   R20	3    -0.13  +/-  0.065 Hz
+PAR_CR   R20	4    -0.06  +/-  0.046 Hz
+
+DAT_CR   Rex	1    26.49   Hz
+DAT_CR   Rex	2    14.19   Hz
+DAT_CR   Rex	3     3.50   Hz
+DAT_CR   Rex	4     2.20   Hz
+
+
+Carver-Richards Global Fit Converged after 7 iterations
+data points 40		 model parameters 8 
+CR r^2 0.987804		chi^2 27.305615		SD 0.766665		AIC 5.373677
+------------------------------------------------------------
+PAR_CR_GLOBAL   PA		1     97.01  +/-  0.266
+PAR_CR_GLOBAL   kex	1  1509.14  +/- 133.019 Hz
+PAR_CR_GLOBAL   dw		1      3.28  +/-  0.290 ppm
+PAR_CR_GLOBAL   dw		2      0.87  +/-  0.053 ppm
+PAR_CR_GLOBAL   R20	1    -1.45  +/-  0.921 Hz
+PAR_CR_GLOBAL   R20	2    -1.40  +/-  0.669 Hz
+PAR_CR_GLOBAL   R20	3    -0.35  +/-  0.110 Hz
+PAR_CR_GLOBAL   R20	4    -0.06  +/-  0.070 Hz
+
+DAT_CR_GLOBAL   Rex	1    23.99   Hz
+DAT_CR_GLOBAL   Rex	2    16.31   Hz
+DAT_CR_GLOBAL   Rex	3     3.78   Hz
+DAT_CR_GLOBAL   Rex	4     1.76   Hz
+
+
+Input Parameters
+------------------------------------------------------------
+Data Files (4)
+	DF	1	./Res77_10d_900.dat 	10	900	77	N
+	DF	2	./Res77_10d_600.dat 	10	600	77	N
+	DF	3	./Res113_10d_900.dat	10	900	113	N
+	DF	4	./Res113_10d_600.dat	10	600	113	N
+Atoms (2)
+	ATOM	1		Data Files: 1	2
+	ATOM	2		Data Files: 3	4
+Groups (2)
+	GROUP	1		Data Files: 1	2
+	GROUP	2		Data Files: 3	4
+OPTIONS
+	OPTION	COMPARE_MODEL_FIT
+	OPTION	FIT_GROUPS_SEPARATE
+	OPTION	WEIGHTS	1.00
+WEIGHTS
+	ATOM	1	1.00
+	ATOM	2	7.39
+
+
+Carver-Richards Initial Condtions - Bounds Not Enforced For Fit
+------------------------------------------------------------
+IC_CR   PA	1      0.95        0.5           1 
+IC_CR   PA	2      0.95        0.5           1 
+IC_CR   kex	1   1000.00          0       1e+06 
+IC_CR   kex	2   1000.00          0       1e+06 
+IC_CR   dw	1      1.00          0         100 
+IC_CR   dw	2      1.00          0         100 
+IC_CR   R20	1      0.06        -10         100 
+IC_CR   R20	2     -0.11        -10         100 
+IC_CR   R20	3      0.07        -10         100 
+IC_CR   R20	4     -0.23        -10         100 
+
+
+Carver-Richards Global Initial Condtions - Bounds Not Enforced For Fit
+------------------------------------------------------------
+IC_CR_GLOBAL   PA	1      0.95        0.5           1 
+IC_CR_GLOBAL   kex	1      1000          0       1e+06 
+IC_CR_GLOBAL   dw	1         1          0         100 
+IC_CR_GLOBAL   dw	2         1          0         100 
+IC_CR_GLOBAL   R20	1   0.05711        -10         100 
+IC_CR_GLOBAL   R20	2    -0.114        -10         100 
+IC_CR_GLOBAL   R20	3   0.07477        -10         100 
+IC_CR_GLOBAL   R20	4   -0.2317        -10         100 
+
+

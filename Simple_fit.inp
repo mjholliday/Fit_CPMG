@@ -1,0 +1,13 @@
+imple_fit.inp:
+#Will fit data from a single residue to the Carver-Richards Equation, the slow #equation, and the fast equation, and compare the fits
+D_FILE 1 1 1 ./Res113_10d_900.dat 113 900 10 N
+D_FILE 2 1 1 ./Res113_10d_600.dat 113 600 10 N
+
+OPTION CALC_SLOW_EQ
+OPTION CALC_FAST_EQ
+OPTION WEIGHTS 1
+
+O_FILE ./113_10d.out
+P_FILE ./113_10d.eps –norm
+
+
