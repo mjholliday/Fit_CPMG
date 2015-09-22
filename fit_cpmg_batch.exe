@@ -1,0 +1,841 @@
+#! /usr/local/bin/octave -qf
+#  vim: set filetype=octave : 
+
+%%%%TO DO%%%%%%%
+%% Input File Format
+%
+%  Each set of data is defined to be associated with a given atom and group
+%    Each atom has a single dw 
+%    Each group has a single kex and PA
+%
+%  line type:     data files
+%  line format:   D_FILE data_file_# atom_# group_# filename res_num field_strength temperature atom_type
+%  line example:  D_FILE 3 2 2 ./cpmg_data.txt 12 900 10 N
+%  line description: Input any number of data files. For each file, specify the file number (must be different for all 
+%         data files), atom number, and group number.  Program will fit an R0 for every data file, a dw for every
+%         atom, and a PA & kex for every group.  Field strength is given in MHz, for proton
+%
+%  line type:     initial conditions
+%  line format:   IC set param ic boundary_condition_lower(optional) boundary_condition_upper(optional)
+%  line example:  IC 2 kex 1500
+%  line example:  IC 1 dw 2 0.1 5
+%  line descripton:  Entering initial conditions is optional, will defult to ic's listed below for any that are not specified
+%         set is the data_file_# for param R0, atom_# for param dw, or group_# for PA or kex. Boundary conditions are also
+%         optional, will default to bc's listed below for any that are not specified.  If one bc is specified, both must be
+%         fit will initially be attempted w/o bc's, and they will be enforced if fit exceedes bcs. 
+%
+%  line type:     options
+%  line format:   OPTION opt
+%  line description:  Various options, listed below
+%      COMPARE_MODEL_FIT   : only works if multiple groups are specified, will also calculate fit with all data/atoms   
+%                            in a single group, with only one kex/PA then compare the fits using 
+%                            both F-test and AIC
+%      CALC_SLOW_EQ        : will also generate fit to slow equation, and compare to CR using AIC
+%      CALC_FAST_EQ        : will also generate fit to fast equation, and compare to CR using AIC
+%      FIT_GROUPS_SEPARATE : will run minimization separately for each group (requires no atom to be part of several groups
+%                             will return error if so.
+%      WEIGHTS X           : Weights data by ~1/(Rex^X), default is no weighting (X=0).  Rex is estimated by the difference 
+%                            btwn largest and smallest R2 values within a data set.  All data for a given atom are scaled by the 
+%                            same value, the data set with the largest Rex.
+
+
+%data set defines from which data set each data point originated, field defines the bkground field of each point
+global data atom group field 
+global PI=3.14159265;
+warning("off");
+
+%Default initial conditions
+IC_R0_default=0; %When set to 0, the R2_ob value with the highest vcpmg will be used as the R0 initial conditon
+IC_R0_bc_default=[-10,100];
+IC_PA_default=0.95;
+IC_PA_bc_default=[0.5,1];
+IC_dw_default=1;
+IC_dw_bc_default=[0,100];
+IC_kex_default=1000;
+IC_kex_bc_default=[0,1e6];
+IC_ka_default=5;
+IC_ka_bc_default=[0.1,200];
+IC_PPdw_default=1;
+IC_PPdw_bc_default=[0,1000];
+
+
+%Initialize arrays and set dfault values
+fit_groups_separate=0; %default to fit groups together
+ic.kex=ic.PA=ic.dw=ic.R0=ic.ka=ic.PPdw=0; %if set to 0, uses default values
+ic.kex_bc=ic.PA_bc=ic.dw_bc=ic.R0_bc=ic.ka_bc=ic.PPdw_bc=[0,0]; %if set to 0, uses default values
+fit.CR.use=1; fit_run={"CR"}; %default to run CR fit
+fit.comp_CR.use=0; fit.fast.use=0; fit.slow.use=0;
+%initilize arrays
+data_file=data_num=atom_num=group_num=d_field=res_in=temp_in=atom_type=[];
+comp_data_num=comp_atom_num=comp_group_num=[];
+vcpmg=R2_ob=err=field=mag_field=data=comp_data=atom=comp_atom=group=comp_group=[];
+weight_val=0; %default is to not wieght data
+residuals=0;
+
+function vect = ints_in(v)
+%Gives a vector of the integers that exist within a vector  
+vect=v(1);
+for n=1:max(v)
+  if(any(v==n) && !any(vect==n)) vect=[vect,n]; end
+end
+end
+
+function vect = remove_spaces(v)
+%shifts numbers to get rid of spaces in integers
+%ie: [1,1,1,2,2,2,4,4,4,6] --> [1,1,1,2,2,2,3,3,3,4]
+vect=v;
+for n=1:max(vect);
+  while(!any(vect==n) && n<max(vect) ) vect(vect>n)--; end
+end
+end
+
+function R2 = Carver_Richards(vcpmg,par,dd=0)
+% vcpmg: vector of cpmg frequencies, in Hz
+% par: CPMG parameters [R0,PA,dw,kex]
+%       R0:  bacground relaxaion one for each data set
+%       PA:  population of state A, i.e. 0.95, one for each group
+%       dw:  difference in freq bwtn states, in ppm, one for each atom
+%       kex: exchange rate, in Hz, one for each group
+
+global data atom group field PI
+
+% populate variables from par and global variables
+if(dd==0)
+  end_r0=max(data);
+  end_PA=max(data)+max(group);
+  end_dw=max(data)+max(group)+max(atom);
+  end_kex=max(data)+2*max(group)+max(atom);
+  R0=par(1:end_r0)(data);
+  PA=par(end_r0+1:end_PA)(group);
+  PB=1-PA;
+  dw=2.*PI.*field.*par(end_PA+1:end_dw)(atom);
+  kex=par(end_dw+1:end_kex)(group);
+else
+  n=size(vcpmg,2);
+  R0=ones(1,n).*par(1);
+  PA=ones(1,n).*par(2);
+  PB=1-PA;
+  dw=ones(1,n).*2.*PI.*(field(data==dd))(1).*par(3);
+  kex=ones(1,n).*par(4);
+end
+
+tau = (1./(4.*vcpmg)); %calculate tau
+n=size(tau,1);
+
+z=2*dw.*kex.*(PB.-PA);
+ps=((PB.-PA).*kex).^2.-dw.^2+4.*PA.*PB.*kex.^2;
+etap=(tau.*2./sqrt(2)).*sqrt(ps.+sqrt(ps.^2.+z.^2));
+etan=(tau.*2./sqrt(2)).*sqrt(-ps.+sqrt(ps.^2.+z.^2));
+Dp=0.5.*(1.+((ps.+2.*(dw.^2))./sqrt(ps.^2+z.^2)));
+Dn=0.5.*(-1.+((ps.+2.*(dw.^2))./sqrt(ps.^2+z.^2)));
+
+R2=(0.5.*(2.*R0.+kex-(1./(2*tau)).*acosh(Dp.*cosh(etap).-Dn.*cos(etan))));
+end
+
+function R2 = Slow_EQ(vcpmg,par,dd=0)
+% vcpmg: vector of cpmg frequencies, in Hz
+% par: CPMG parameters [R0,dw,kex]
+%       N R0s:  one for each data set
+%       dw: difference in freq bwtn states, in ppm, one for each atom
+%       ka: exchange rate, in Hz, one for each group
+
+global data atom group field PI
+
+if(dd==0)
+  end_r0=max(data);
+  end_dw=max(data)+max(atom);
+  end_ka=max(data)+max(atom)+max(group);
+  R0=par(1:end_r0)(data);
+  dw=2.*PI.*field.*par(end_r0+1:end_dw)(atom);
+  ka=par(end_dw+1:end_ka)(group);
+else
+  n=size(vcpmg,2);
+  R0=ones(1,n).*par(1);
+  dw=ones(1,n).*2.*PI.*(field(data==dd))(1).*par(2);
+  ka=ones(1,n).*par(3);
+end
+
+tau = (1./(4.*vcpmg)); %calculate tau
+
+R2 = R0.+ka.-ka.*sin(tau.*dw)./(tau.*dw);
+
+end
+
+function R2 = Fast_EQ(vcpmg,par,dd=0)
+% vcpmg: vector of cpmg frequencies, in Hz
+% par: CPMG parameters [R0,dw,kex]
+%      N R0s:  one for each data set
+%      PPdw: PA*PB*dw^2 - a single variable, one for each atom
+%      kex: exchange rate, in Hz, one for each group
+
+global data atom group field PI
+
+if(dd==0)
+  end_r0=max(data);
+  end_dw=max(data)+max(atom);
+  end_kex=max(data)+max(atom)+max(group);
+  R0=par(1:end_r0)(data);
+  PPdw=((2.*PI.*field).^2).*par(end_r0+1:end_dw)(atom);
+  kex=par(end_dw+1:end_kex)(group);
+else
+  n=size(vcpmg,2);
+  R0=ones(1,n).*par(1);
+  PPdw=ones(1,n).*(2.*PI.*(field(data==dd))(1)).^2.*par(2);
+  kex=ones(1,n).*par(3);
+end
+
+tau = (1./(4.*vcpmg)); %calculate tau
+
+R2 = R0.+(PPdw./kex).*(1-(tanh(kex.*tau))./(kex.*tau));
+
+end
+
+function f = field_conversion(atom)
+if(strcmp(atom,"H")==1) f=1.0; end
+if(strcmp(atom,"N")==1) f=0.101363298; end
+if(strcmp(atom,"C")==1) f=0.25143451; end
+end
+
+function val = is_equal(a,b)
+%checks if two vectors or matrices are equal (only works for 1 or 2 dimensions)
+if(size(a,1) != size(b,1) || size(a,2) != size(b,2)) val=0;
+elseif(sum(sum(a==b)) != size(a,1)*size(a,2)) val=0; 
+else val=1; end
+end
+
+function val = rand_interval(N,n)
+% returns vector of length N of random integers between 1/n and n, evenly distributed
+% such that their is equal likelyhood of being gt or lt 1
+split = (rand(N,1)>0.5);
+val = zeros(N,1);
+val(split)=rand(sum(split),1)*(n-1)+1;
+val(!split)=rand(N-sum(split),1)*(1-1/n)+1/n;
+end
+
+%% READ INPUT FILE %%
+ival=argv;
+ifile=fopen(ival{1},"r");
+if(ifile == -1) error("NO INPUT FILE") end;
+while(strcmp(typeinfo(lin=fgetl(ifile)),"scalar") == 0) 
+  if(index(lin,"D_FILE") == 1) %get input data files and parameters
+    [LINE,dn,an,gn,df,res,f,tem,at]=strread(lin,"%s %f %f %f %s %f %f %f %s");
+    if(exist(df{1})==2) %%Check that data file exists
+      data_num = [data_num;dn]; 
+      atom_num = [atom_num;an];  
+      group_num = [group_num;gn];  
+      data_file = [data_file;df{1}]; 
+      d_field = [d_field;f];  
+      res_in = [res_in;res];  
+      temp_in = [temp_in;tem];  
+      atom_type = [atom_type;at{1}]; 
+    end 
+  end
+  if(index(lin,"COMP_SET") == 1) %alternative atom/group settings to compare
+    [LINE,dn,an,gn]=strread(lin,"%s %f %f %f");
+    comp_data_num = [comp_data_num;dn]; 
+    comp_atom_num = [comp_atom_num;an]; 
+    comp_group_num = [comp_group_num;gn]; 
+  end
+  if(index(lin,"O_FILE") == 1) %get output file
+    [LINE,output_file]=strread(lin,"%s %s");
+    output_file=output_file{1};
+  end
+  if(index(lin,"P_FILE") == 1) %get plot file (will plot output if included)
+    [LINE,pf,opt1,opt2]=strread(lin,"%s %s %s %s");
+    plot_file=pf{1};
+    norm=0;
+    if(size(opt1,1)!=0)
+      if(strcmp(strtrim(opt1),"-norm")==1) norm=1; end
+    end
+  end
+  if(index(lin,"F_FILE") == 1) %get fit file (will print 2 fit files - one with fits at vcmpg values, other with fits at 1 Hz increments)
+    %one with fits at vcmpg values (file 1), other with fits at 1 Hz increments(file 2)
+    [LINE,ff1,ff2]=strread(lin,"%s %s %s");
+    fit_file1=ff1{1};
+    fit_file2=ff2{1};
+  end
+  if(index(lin,"IC") == 1) %get initial conditions
+    [LINE,param,ind,val,b1,b2]=strread(lin,"%s %s %f %f %f %f");
+    name=strtrim(param);
+    name_b=strcat(name,"_bc");
+    if(size(ic.(name),1) < ind) ic.(name)=[ic.(name);zeros(ind-size(ic.(name),1),1)]; end
+    ic.(name)(ind)=val;
+    if(size(ic.(name_b),1) < ind) ic.(name_b)=[ic.(name_b);zeros(ind-size(ic.(name_b),1),2)]; end
+    if(size(b2,1)!=0) ic.(name_b)(ind,:)=[b1,b2]; end
+  end
+  if(index(lin,"COMP_MODEL") == 1) %get initial conditions
+    [LINE,dn,an,gn]=strread(lin,"%s %f %f %f");
+  end
+
+  if(index(lin,"OPTION") == 1) %get initial conditions
+    [LINE,opt,opt_n]=strread(lin,"%s %s %f"); 
+    if(index(opt,"CALC_SLOW_EQ")) fit.slow.tag = "CALC_SLOW_EQ"; fit.slow.use=1; fit_run=[fit_run,{"slow"}]; end
+    if(index(opt,"CALC_FAST_EQ")) fit.fast.tag = "CALC_FAST_EQ"; fit.fast.use=1; fit_run=[fit_run,{"fast"}]; end
+    if(index(opt,"COMPARE_MODEL_FIT")) fit.comp_CR.tag = "COMPARE_MODEL_FIT"; fit.comp_CR.use=1; fit_run=[fit_run,{"comp_CR"}]; end
+    if(index(opt,"FIT_GROUPS_SEPARATE")) fit_groups_separate=1; end
+    if(index(opt,"WEIGHTS")) weight_val = opt_n; end
+  end
+end
+
+
+%check that data_files are found
+if(size(data_file)==0) error("NO DATA FILES FOUND"); end
+%check that comp data inputs are equal to normal inputs/remove comp inputs where input data was not found
+if(size(comp_data_num)==0) comp_data_num=data_num; comp_atom_num=atom_num; comp_group_num=ones(size(group_num)); end
+comp_atom_num=comp_atom_num(ismember(comp_data_num,data_num));
+comp_group_num=comp_group_num(ismember(comp_data_num,data_num));
+comp_data_num=comp_data_num(ismember(comp_data_num,data_num));
+
+%Read data files into variables "vcpmg", "R2_ob", and "err"(if included), generate global vectors "data_set" and "field"
+for n=1:size(data_num,1)
+  a=load(strtrim(data_file(n,:)));
+  vcpmg = [vcpmg;a(:,1)]; 
+  R2_ob = [R2_ob;a(:,2)];  
+  if(size(a,2)>2) err = [err;a(:,3)]; end
+  fm=field_conversion(strtrim(atom_type(n)));
+  field = [field;fm*d_field(n)*ones(size(a,1),1)]; 
+  mag_field = [mag_field;d_field(n)*ones(size(a,1),1)];  
+  %Check that more than one data file are not assigned the same number
+  if(sum(data==data_num(n))!=0) error("MORE THAN ONE DATA FILE ASSIGNED SAME DATA NUMBER"); end
+  data = [data;data_num(n)*ones(size(a,1),1)];
+  atom = [atom;atom_num(n)*ones(size(a,1),1)];
+  group = [group;group_num(n)*ones(size(a,1),1)]; 
+
+  if(fit.comp_CR.use)
+    comp_atom = [comp_atom;comp_atom_num(n)*ones(size(a,1),1)] ;
+    comp_data = [comp_data;comp_data_num(n)*ones(size(a,1),1)] ;
+    comp_group = [comp_group;comp_group_num(n)*ones(size(a,1),1)]; 
+  end
+end
+
+%Populate initial conditions and bounds
+if(size(ic.R0,1)<max(data)) ic.R0=[ic.R0;zeros(max(data)-size(ic.R0),1)]; ic.R0_bc=[ic.R0_bc;zeros(max(data)-size(ic.R0_bc),2)]; end
+if(size(ic.dw,1)<max(atom)) ic.dw=[ic.dw;zeros(max(atom)-size(ic.dw),1)]; ic.dw_bc=[ic.dw_bc;zeros(max(atom)-size(ic.dw_bc),2)]; end
+if(size(ic.PPdw,1)<max(atom)) ic.PPdw=[ic.PPdw;zeros(max(atom)-size(ic.PPdw),1)]; ic.PPdw_bc=[ic.PPdw_bc;zeros(max(atom)-size(ic.PPdw_bc),2)]; end
+if(size(ic.PA,1)<max(group)) ic.PA=[ic.PA;zeros(max(group)-size(ic.PA),1)]; ic.PA_bc=[ic.PA_bc;zeros(max(group)-size(ic.PA_bc),2)]; end
+if(size(ic.kex,1)<max(group)) ic.kex=[ic.kex;zeros(max(group)-size(ic.kex),1)]; ic.kex_bc=[ic.kex_bc;zeros(max(group)-size(ic.kex_bc),2)]; end
+if(size(ic.ka,1)<max(group)) ic.ka=[ic.ka;zeros(max(group)-size(ic.ka),1)]; ic.ka_bc=[ic.ka_bc;zeros(max(group)-size(ic.ka_bc),2)]; end
+%Remove ICs that do not match with data_sets
+ic.R0=ic.R0(ints_in(data_num)); ic.R0_bc=ic.R0_bc(ints_in(data_num),:);
+ic.dw=ic.dw(ints_in(atom_num)); ic.dw_bc=ic.dw_bc(ints_in(atom_num),:);
+ic.PPdw=ic.PPdw(ints_in(atom_num)); ic.PPdw_bc=ic.PPdw_bc(ints_in(atom_num),:);
+ic.PA=ic.PA(ints_in(group_num)); ic.PA_bc=ic.PA_bc(ints_in(group_num),:);
+ic.kex=ic.kex(ints_in(group_num)); ic.kex_bc=ic.kex_bc(ints_in(group_num),:);
+ic.ka=ic.ka(ints_in(group_num)); ic.ka_bc=ic.ka_bc(ints_in(group_num),:);
+%shift numbering of data,atom,and group so numbers are continuous
+for n=1:size(comp_data_num,1)
+  comp_data_num(n) = remove_spaces(data_num)(find(data_num == comp_data_num(n),1));
+  comp_group_num(n) = remove_spaces(group_num)(find(group_num == comp_group_num(n),1));
+  comp_atom_num(n) = remove_spaces(atom_num)(find(atom_num == comp_atom_num(n),1));
+end
+data_num=remove_spaces(data_num);
+atom_num=remove_spaces(atom_num);
+group_num=remove_spaces(group_num);
+data=remove_spaces(data); 
+atom=remove_spaces(atom); 
+group=remove_spaces(group);
+%Set ICs to defaults if 0
+ic.dw(ic.dw==0)=IC_dw_default;
+ic.PPdw(ic.PPdw==0)=IC_PPdw_default;
+ic.PA(ic.PA==0)=IC_PA_default;
+ic.kex(ic.kex==0)=IC_kex_default;
+ic.ka(ic.ka==0)=IC_ka_default;
+ic.R0(ic.R0==0)=IC_R0_default;
+%If R0 == 0, set to measured R2 value at highest vcpmg level
+for n=1:size(data_num,1)
+  if(ic.R0(n)==0) ic.R0(n)=(R2_ob(data==n))(vcpmg(data==n)==max(vcpmg(data==n))); end
+end
+%Set Bounds to default if == 0
+ic.R0_bc += (ic.R0_bc==0).*repmat(IC_R0_bc_default,size(ic.R0_bc,1),1);
+ic.dw_bc += (ic.dw_bc==0).*repmat(IC_dw_bc_default,size(ic.dw_bc,1),1);
+ic.PPdw_bc += (ic.PPdw_bc==0).*repmat(IC_PPdw_bc_default,size(ic.PPdw_bc,1),1);
+ic.PA_bc += (ic.PA_bc==0).*repmat(IC_PA_bc_default,size(ic.PA_bc,1),1);
+ic.kex_bc += (ic.kex_bc==0).*repmat(IC_kex_bc_default,size(ic.kex_bc,1),1);
+ic.ka_bc += (ic.ka_bc==0).*repmat(IC_ka_bc_default,size(ic.ka_bc,1),1);
+% IC/Bounds CR 
+fit.CR.IC =  [ic.R0;ic.PA;ic.dw;ic.kex];                              
+fit.CR.bounds = [ic.R0_bc;ic.PA_bc;ic.dw_bc;ic.kex_bc];       %
+fit.CR.fit_eq = "Carver_Richards";
+% IC/Bounds CR comp
+fit.comp_CR.IC = [ic.R0;ic.PA(ints_in(comp_group_num));ic.dw(ints_in(comp_atom_num));ic.kex(ints_in(comp_group_num))];
+fit.comp_CR.bounds = [ic.R0_bc;ic.PA_bc(ints_in(comp_group_num),:);ic.dw_bc(ints_in(comp_atom_num),:);ic.kex_bc(ints_in(comp_group_num),:)];
+fit.comp_CR.fit_eq = "Carver_Richards";
+% IC/Bounds Slow 
+fit.slow.IC = [ic.R0;ic.dw;ic.ka];                  
+fit.slow.bounds = [ic.R0_bc;ic.dw_bc;ic.ka_bc];     
+fit.slow.fit_eq = "Slow_EQ";
+% IC/Bounds Fast 
+fit.fast.IC = [ic.R0;ic.PPdw;ic.kex];                  
+fit.fast.bounds = [ic.R0_bc;ic.PPdw_bc;ic.kex_bc];     
+fit.fast.fit_eq = "Fast_EQ";
+
+%Carver-Richards data locations  
+fit.CR.beg_PA=max(data);
+fit.CR.beg_dw=max(data)+max(group);
+fit.CR.beg_kex=max(data)+max(group)+max(atom);
+%Carver-Richards Global Comp data locations  
+fit.comp_CR.beg_PA=max(data);
+fit.comp_CR.beg_dw=max(data)+size(ints_in(comp_group_num),2);
+fit.comp_CR.beg_kex=max(data)+size(ints_in(comp_atom_num),2)+size(ints_in(comp_group_num),2);
+comp_data=remove_spaces(comp_data);
+comp_atom=remove_spaces(comp_atom);
+comp_group=remove_spaces(comp_group);
+%Slow EQ data locations  
+fit.slow.beg_PA=max(data);
+fit.slow.beg_dw=max(data);
+fit.slow.beg_ka=max(data)+max(atom);
+%Fast EQ data locations  
+fit.fast.beg_PA=max(data);
+fit.fast.beg_dw=max(data);
+fit.fast.beg_kex=max(data)+max(atom);
+
+%weights, estimated by ~1/(Rex^weight_val) with default weight_val=0 (ie, no weighting)
+%Rex is estimated from difference between max and min values for each data set
+%For Rex < 1, Rex of 1 is used
+%The same weighting is applied to all data sets for a given atom, defined by the largest Rex
+weights=ones(size(data));
+for n=1:size(data)
+  weights(data==n) = 1/(max(R2_ob(data==n))-min(R2_ob(data==n))).^(weight_val);
+end
+for n=1:size(atom) %apply smallest weighting (largest Rex) per atom
+  weights(atom==n) = min(weights(atom==n));
+end
+weights(weights > 1) = 1;
+weights /= min(weights);
+
+
+%Minimization/Fits
+for n = 1:size(fit_run,2) %loop through each fit type (CR,CR_comp,fast,slow) indicated in fit_run
+  name = fit_run(n);
+
+  if(index(name,"comp_CR")) %save original values in hold variables and transfer comp values to atom and group
+    group_hold = group;
+    atom_hold = atom;
+    group = comp_group;
+    atom = comp_atom;
+  end
+
+  loop_fit=max(group); %default: won't loop unless 'fit_groups_separate' is set
+
+  if (fit_groups_separate && !index(name,"comp_CR"))
+    %Test that each atom is only assigned to one group
+    for m=1:max(atom) if(size(ints_in(group(atom == m)),2)>1) error("CANNOT FIT ALL GROUPS SEPARATELY IF ATOMS ARE ASSIGNED TO MULTIPLE GROUPS"); end end
+    loop_fit=1; %Loop Counter
+    %Initialize outputs
+    fit.(name).fit = zeros(size(R2_ob));
+    fit.(name).par_opt = zeros(size(fit.(name).IC));
+    fit.(name).cvg = fit.(name).iter  = fit.(name).r2 = fit.(name).used_bound = zeros(max(group),1);
+    fit.(name).covp = zeros(size(fit.(name).IC,1),size(fit.(name).IC,1));
+  end
+
+  while(loop_fit <= max(group)) % loop if 'fit_groups_separate' is set
+
+    if(fit_groups_separate && !index(name,"comp_CR")) %set variables for fitting groups separately
+      name = strcat(fit_run(n),"_",int2str(loop_fit));
+
+      dat_ind = (group==loop_fit);
+      if(index(name,"slow")) beg_k = fit.(fit_run(n)).beg_ka; else beg_k = fit.(fit_run(n)).beg_kex; end 
+      ic_ind = [data_num(group_num==loop_fit);fit.(fit_run(n)).beg_PA+loop_fit;fit.(fit_run(n)).beg_dw+ints_in(atom_num(group_num==loop_fit))';beg_k+loop_fit];
+
+      vcpmg_hold = vcpmg; R2_ob_hold = R2_ob; weights_hold = weights;
+      group_hold = group; atom_hold = atom; data_hold = data; field_hold = field;
+
+      vcpmg  = vcpmg(dat_ind); R2_ob = R2_ob(dat_ind); weights = weights(dat_ind);
+      group = remove_spaces(group(dat_ind)); atom=remove_spaces(atom(dat_ind)); data = remove_spaces(data(dat_ind)); field = field(dat_ind);
+
+      fit.(name).beg_PA = size(data_num(group_num==loop_fit),1);
+      fit.(name).beg_dw = fit.(fit_run(n)).beg_PA+size(ints_in(atom_num(group_num==loop_fit)),1);
+
+      fit.(name).fit_eq = fit.(fit_run(n)).fit_eq;
+      fit.(name).IC = fit.(fit_run(n)).IC(ic_ind); 
+      fit.(name).bounds = fit.(fit_run(n)).bounds(ic_ind,:);
+    end
+
+
+    % run minimization routine - retry up to 10x while fits don't converge, altering initial conditions
+    retry=1;
+    ic_in=fit.(name).IC;
+    option.bounds = fit.(name).bounds;
+    count=0;
+    while(retry==1)
+      %Run Fit
+      %Try w/o bounds
+      try
+        fit.(name).used_bound=0;
+        [fit.(name).fit,fit.(name).par_opt,fit.(name).cvg,fit.(name).iter,fit.(name).corp,fit.(name).covp,fit.(name).covr,fit.(name).stdresid,fit.(name).Z,fit.(name).r2] =  leasqr(vcpmg,R2_ob,ic_in,fit.(name).fit_eq,0.000001,2000,weights,0.000001*ones(size(fit.(name).IC)),'dfdp');
+
+
+        %Check if bounds were exceded, employ bounds if needed
+
+        if(sum((fit.(name).par_opt-option.bounds(:,1)<0)+(fit.(name).par_opt-option.bounds(:,2)>0)>0))
+          fit.(name).used_bound=1;
+          [fit.(name).fit,fit.(name).par_opt,fit.(name).cvg,fit.(name).iter,fit.(name).corp,fit.(name).covp,fit.(name).covr,fit.(name).stdresid,fit.(name).Z,fit.(name).r2] = leasqr(vcpmg,R2_ob,ic_in,fit.(name).fit_eq,0.000001,2000,weights,0.000001*ones(size(fit.(name).IC)),'dfdp',option);
+        end
+
+      end
+
+      if (sum(sum(abs(fit.(name).covp) < 1e40)) == prod(size(fit.(name).covp)) || count == 10) retry=0;
+      else
+        % if fit didn't converge, randomly multiply initial dw and kex values by [1/5:5]
+        % and randomly set PA values to [0.8:1] 
+        ic_in(fit.(name).beg_dw+1:end) = fit.(name).IC(fit.(name).beg_dw+1:end).*rand_interval(size(ic_in(fit.(name).beg_dw+1:end),1),5);
+        ic_in(fit.(name).beg_PA+1:fit.(name).beg_dw) = rand(fit.(name).beg_dw-fit.(name).beg_PA,1)*.2+0.8;
+      end
+      count++; 
+    end 
+
+    fit.(name).IC = ic_in;
+
+    %%if groups are fit separately, put outputs back into original structures
+    if (fit_groups_separate && !index(fit_run(n),"comp_CR"))
+      fit.(fit_run(n)).fit(dat_ind) = fit.(name).fit;
+      fit.(fit_run(n)).par_opt(ic_ind) = fit.(name).par_opt;
+      fit.(fit_run(n)).cvg(loop_fit) = fit.(name).cvg;
+      fit.(fit_run(n)).iter(loop_fit) = fit.(name).iter;
+      fit.(fit_run(n)).r2(loop_fit) = fit.(name).r2;
+      fit.(fit_run(n)).covp(ic_ind,ic_ind) = fit.(name).covp;         
+      fit.(fit_run(n)).IC(ic_ind) = fit.(name).IC;
+      fit.(fit_run(n)).used_bound = max([fit.(fit_run(n)).used_bound;fit.(name).used_bound]);
+      vcpmg = vcpmg_hold; R2_ob = R2_ob_hold; weights = weights_hold;
+      group = group_hold; atom = atom_hold; data=data_hold; field = field_hold;
+    end
+    loop_fit++; 
+  end
+
+  if(index(name,"comp_CR"))
+    group = group_hold;
+    atom = atom_hold;
+  end
+
+  name=fit_run(n);
+
+  %Statistics
+  fit.(name).r2 =  1-(sum((fit.(name).fit.-R2_ob).^2)./sum((R2_ob.-mean(R2_ob)).^2));
+  fit.(name).npoints=size(R2_ob,1); %data points
+  fit.(name).param=size(fit.(name).par_opt,1);%-max(data); %parameters
+  fit.(name).DF=fit.(name).npoints-fit.(name).param-1;
+  fit.(name).chi2 = sum(((fit.(name).fit .- R2_ob).^2).*weights); %Chi^2 
+  fit.(name).RSS = sum(((fit.(name).fit .- R2_ob).^2)); %Residual Sum of Squares
+  fit.(name).SD = sqrt(sum(((fit.(name).fit .- R2_ob).^2))/fit.(name).npoints); %Standard Deviation from model fit - used for error bars
+  fit.(name).AIC = fit.(name).npoints.*log(sum(weights.*(fit.(name).fit .- R2_ob).^2)/fit.(name).npoints)+2*fit.(name).param+2*fit.(name).param.*(fit.(name).param+1)/(fit.(name).npoints-fit.(name).param-1); %Akaike information criterion - with finite sample size correction
+  fit.(name).SC = fit.(name).npoints.*log(sum(weights.*(fit.(name).fit .- R2_ob).^2)/fit.(name).npoints)+fit.(name).param*log(fit.(name).npoints);
+  fit.(name).MSC = log(sum(weights.*(fit.(name).fit .- mean(fit.(name).fit)).^2)./sum(weights.*(fit.(name).fit .- R2_ob).^2))-2*fit.(name).param/fit.(name).npoints;
+  fit.(name).MSC;
+  fit.(name).SC;
+end
+
+%Comparative Statistics
+for n=2:size(fit_run,2)
+  name = fit_run(n);
+  fit.(name).AIC_comp = exp((fit.CR.AIC-fit.(name).AIC)/2);
+end
+if(sum(strcmp(fit_run,"comp_CR"))==1)
+  fit.comp_CR.Ftest = ((fit.comp_CR.chi2-fit.CR.chi2)/fit.CR.chi2)/((fit.comp_CR.DF-fit.CR.DF)/(fit.CR.DF));
+  fit.comp_CR.Fprob = 1-fcdf(fit.comp_CR.Ftest,fit.comp_CR.DF-fit.CR.DF,fit.CR.DF);
+end
+%ChiSquared for individual residues
+X2=zeros(max(group),2);
+Xratio=zeros(max(group),1);
+if(sum(strcmp(fit_run,"comp_CR"))==1)
+  for n=1:max(group)
+    a=find(group==n);
+    X2(n,1)=sum((fit.CR.fit(a) .- R2_ob(a)).^2);
+    X2(n,2)=sum((fit.comp_CR.fit(a) .- R2_ob(a)).^2);
+    Xratio(n)=X2(n,2)./X2(n,1);
+  end   
+end
+
+%[s,i]=sort(Xratio,"descend");
+
+%[ints_in(res_in)'(i),s,X2(i,:)]
+
+
+
+%Plot Data
+if(exist("plot_file"))
+  f=figure('Visible','off');
+  hold off;
+  for n=1:max(data)
+    for m=1:size(fit_run,2)
+      name = fit_run(m);
+      vcpmg_d=vcpmg(data==n);
+      fit_d=fit.(name).fit(data==n);
+      norm_adj = norm*(fit_d((vcpmg_d==max(vcpmg_d)))(1));
+      %R2_d=(R2_ob(data==n)-norm_adj).*weights(data==n);
+      R2_d=(R2_ob(data==n)-norm_adj);
+
+      vcpmg_full=[1:1000];
+
+      if(strcmp(fit_run(m),"CR")) 
+        plot_par=[fit.CR.par_opt(n);fit.CR.par_opt(fit.CR.beg_PA+group_num(n));fit.CR.par_opt(fit.CR.beg_dw+atom_num(n));fit.CR.par_opt(fit.CR.beg_kex+group_num(n))];
+        %fit_d=(Carver_Richards(vcpmg_full,plot_par,n)-norm_adj).*weights(data==n); 
+        fit_d=(Carver_Richards(vcpmg_full,plot_par,n)-norm_adj); 
+      elseif(strcmp(fit_run(m),"comp_CR"))
+        plot_par=[fit.comp_CR.par_opt(n);fit.comp_CR.par_opt(fit.comp_CR.beg_PA+1);fit.comp_CR.par_opt(fit.comp_CR.beg_dw+atom_num(n));fit.comp_CR.par_opt(fit.comp_CR.beg_kex+1)];
+        %fit_d=(Carver_Richards(vcpmg_full,plot_par,n)-norm_adj).*weights(data==n); 
+        fit_d=(Carver_Richards(vcpmg_full,plot_par,n)-norm_adj); 
+      elseif(strcmp(fit_run(m),"slow"))
+        plot_par=[fit.slow.par_opt(n);fit.slow.par_opt(fit.slow.beg_dw+atom_num(n));fit.slow.par_opt(fit.slow.beg_ka+group_num(n))];
+        fit_d=Slow_EQ(vcpmg_full,plot_par,n)-norm_adj; 
+      elseif(strcmp(fit_run(m),"fast"))
+        plot_par=[fit.fast.par_opt(n);fit.fast.par_opt(fit.fast.beg_dw+atom_num(n));fit.fast.par_opt(fit.fast.beg_kex+group_num(n))];
+        fit_d=Fast_EQ(vcpmg_full,plot_par,n)-norm_adj; 
+      end 
+
+      subplot(size(fit_run,2),1,m)
+      errorbar(vcpmg_d,R2_d,ones(size(vcpmg_d,1),1).*fit.(name).SD,strcat(".",num2str(mod(n,6)),";",fit_run(m),":",int2str(mag_field(data==n)(1)),";")),
+      hold on
+      %plot(vcpmg_full,fit_d.-R2_d,strcat("*-",num2str(mod(n,6))));
+      plot(vcpmg_full,fit_d,strcat("-",num2str(mod(n,6))));
+    end
+  end
+  print(plot_file,"-color");
+end
+
+
+
+
+%Print Fit Data
+sub_val=zeros(max(data),size(fit_run,2));
+if(exist("fit_file2","var"))
+  out_mat2=[10:1000]';
+  for n=1:max(data)
+    for m=1:size(fit_run,2)
+      name = fit_run(m);
+      vcpmg_d=vcpmg(data==n);
+      fit_d=fit.(name).fit(data==n);
+      R2_d=(R2_ob(data==n));
+
+      vcpmg_full=[10:1000];
+
+      if(strcmp(fit_run(m),"CR"))
+        plot_par=[fit.CR.par_opt(n);fit.CR.par_opt(fit.CR.beg_PA+group_num(n));fit.CR.par_opt(fit.CR.beg_dw+atom_num(n));fit.CR.par_opt(fit.CR.beg_kex+group_num(n))];
+        fit_d=(Carver_Richards(vcpmg_full,plot_par,n));
+        sub_val(n,m)=min(fit_d);
+        fit_d -= min(fit_d);
+        out_mat2=[out_mat2,fit_d'];
+      elseif(strcmp(fit_run(m),"comp_CR"))
+        plot_par=[fit.comp_CR.par_opt(n);fit.comp_CR.par_opt(fit.comp_CR.beg_PA+1);fit.comp_CR.par_opt(fit.comp_CR.beg_dw+atom_num(n));fit.comp_CR.par_opt(fit.comp_CR.beg_kex+1)];
+        fit_d=(Carver_Richards(vcpmg_full,plot_par,n));
+        sub_val(n,m)=min(fit_d);
+        fit_d -= min(fit_d);
+        out_mat2=[out_mat2,fit_d'];
+      elseif(strcmp(fit_run(m),"slow"))
+        plot_par=[fit.slow.par_opt(n);fit.slow.par_opt(fit.slow.beg_dw+atom_num(n));fit.slow.par_opt(fit.slow.beg_ka+group_num(n))];
+        fit_d=Slow_EQ(vcpmg_full,plot_par,n);
+        sub_val(n,m)=min(fit_d);
+        fit_d -= min(fit_d);
+        out_mat2=[out_mat2,fit_d'];
+      elseif(strcmp(fit_run(m),"fast"))
+        plot_par=[fit.fast.par_opt(n);fit.fast.par_opt(fit.fast.beg_dw+atom_num(n));fit.fast.par_opt(fit.fast.beg_kex+group_num(n))];
+        fit_d=Fast_EQ(vcpmg_full,plot_par,n);
+        sub_val(n,m)=min(fit_d);
+        fit_d -= min(fit_d);
+        out_mat2=[out_mat2,fit_d'];
+      end
+    end
+  end
+  save(fit_file2,"out_mat2","-ascii");
+end
+
+if(exist("fit_file1","var"))
+  fit_file1
+  out_mat1 = [data,field,vcpmg];
+  for m=1:size(fit_run,2)
+    name = fit_run(m);
+    fit_dat=fit.(name).fit(:);
+    raw_dat=R2_ob;
+    for n=1:max(data)
+      fit_dat(data==n)-=sub_val(n,m);
+      raw_dat(data==n)-=sub_val(n,m);
+    end
+    out_mat1=[out_mat1,raw_dat,fit_dat];
+  end
+  save(fit_file1,"out_mat1","-ascii");
+end
+
+
+
+%Print Output
+if(exist("output_file")==0) output_file = "default.out"; end
+ofile = fopen(output_file,"w");
+%Model Comparisons
+if(sum(strcmp(fit_run,"comp_CR"))==1)
+  fprintf(ofile,"Global Fit vs. Inidividual Fits\n");
+  fprintf(ofile,"------------------------------------------------------------\n");
+  if(fit.comp_CR.Fprob < 0.05) fprintf(ofile,"F-test suggests inidividual fits are likely better: ");
+  else fprintf(ofile,"F-test suggests inidividual fits are not better: "); end
+  fprintf(ofile,"P-value %g\n",fit.comp_CR.Fprob);
+  if(fit.comp_CR.AIC_comp < 0.1) fprintf(ofile,"AIC suggests inidividual fits are likely better: \n");
+  elseif(fit.comp_CR.AIC_comp > 10) fprintf(ofile,"AIC suggests global fit is likely better: \n"); 
+  elseif(fit.comp_CR.AIC_comp < 1) fprintf(ofile,"AIC is inconlusive but individual fits may be better: \n");
+  elseif(fit.comp_CR.AIC_comp > 1) fprintf(ofile,"AIC is inconlusive but global fit may be better: \n"); end
+  fprintf(ofile,"AIC Inidividual: %f\tGlobal: %f\t Relative Likelihood: %g \n\n\n",fit.CR.AIC,fit.comp_CR.AIC,fit.comp_CR.AIC_comp);
+end
+if(sum(strcmp(fit_run,"slow"))==1)
+  fprintf(ofile,"Carver-Richards vs. Slow Exchange Equation\n");
+  fprintf(ofile,"------------------------------------------------------------\n");
+  if(fit.slow.AIC_comp < 0.1) fprintf(ofile,"AIC suggests Carver-Richards fit is likely better: \n");
+  elseif(fit.slow.AIC_comp > 10) fprintf(ofile,"AIC suggests Slow Equation fit is likely better: \n");
+  elseif(fit.slow.AIC_comp < 1) fprintf(ofile,"AIC is inconlusive but Carver-Richards fit may be better: \n");
+  elseif(fit.slow.AIC_comp > 1) fprintf(ofile,"AIC is inconlusive but Slow Equation fit may be better: \n"); end
+  fprintf(ofile,"AIC Carver-Richards: %f\tSlow: %f\t Relative Likelihood: %g \n\n\n",fit.CR.AIC,fit.slow.AIC,fit.slow.AIC_comp);
+end
+if(sum(strcmp(fit_run,"fast"))==1)
+  fprintf(ofile,"Carver-Richards vs. Fast Exchange Equation\n");
+  fprintf(ofile,"------------------------------------------------------------\n");
+  if(fit.fast.AIC_comp < 0.1) fprintf(ofile,"AIC suggests Carver-Richards fit is likely better: \n");
+  elseif(fit.fast.AIC_comp > 10) fprintf(ofile,"AIC suggests Fast Equation fit is likely better: \n");
+  elseif(fit.fast.AIC_comp < 1) fprintf(ofile,"AIC is inconlusive but Carver-Richards fit may be better: \n");
+  elseif(fit.fast.AIC_comp > 1) fprintf(ofile,"AIC is inconlusive but Fast Equation fit may be better: \n"); end
+  fprintf(ofile,"AIC Carver-Richards: %f\tSlow: %f\t Relative Likelihood: %g \n\n\n",fit.CR.AIC,fit.fast.AIC,fit.fast.AIC_comp);
+end
+
+%Carver-Richards output
+if (sum(fit.CR.cvg) < size(fit.CR.cvg))  fprintf(ofile,"Group %i Carver-Richards MINIMIZATION DID NOT CONVERGE AFTER %i ITERATONS\n",ints_in(group)(!fit.CR.cvg),fit.CR.iter(!fit.CR.cvg));
+else
+  if(fit_groups_separate) fprintf(ofile,"Group %i Carver-Richards Fit Converged after %i iterations\n",[(ints_in(group));fit.CR.iter']);
+  else  fprintf(ofile,"Carver-Richards Fit Converged after %i iterations\n",fit.CR.iter); end
+  fprintf(ofile,"data points %i\t\t model parameters %i \n",fit.CR.npoints,fit.CR.param);
+  fprintf(ofile,"CR r^2 %f\t\tchi^2 %f\t\tSD %f\t\tAIC %f\n",fit.CR.r2,fit.CR.chi2,fit.CR.SD,fit.CR.AIC);
+  fprintf(ofile,"------------------------------------------------------------\n");
+  for n=1:max(group) fprintf(ofile,"PAR_CR   PA\t\t%i  %8.2f  +/- %6.3f\n",n,100*fit.CR.par_opt(fit.CR.beg_PA+n),100*sqrt(fit.CR.covp(fit.CR.beg_PA+n,fit.CR.beg_PA+n))); end
+  for n=1:max(group) fprintf(ofile,"PAR_CR   kex\t%i %8.2f  +/- %6.3f Hz\n",n,fit.CR.par_opt(fit.CR.beg_kex+n),sqrt(fit.CR.covp(fit.CR.beg_kex+n,fit.CR.beg_kex+n))); end
+  for n=1:max(atom)  fprintf(ofile,"PAR_CR   dw\t\t%i  %8.2f  +/- %6.3f ppm\n",n,fit.CR.par_opt(fit.CR.beg_dw+n),sqrt(fit.CR.covp(fit.CR.beg_dw+n,fit.CR.beg_dw+n))); end
+  for n=1:max(data)  fprintf(ofile,"PAR_CR   R20\t%i %8.2f  +/- %6.3f Hz\n",n,fit.CR.par_opt(n),sqrt(fit.CR.covp(n,n))); end
+  fprintf(ofile,"\n");
+  for n=1:max(data) fprintf(ofile,"DAT_CR   Rex\t%i %8.2f   Hz\n",n,max(fit.CR.fit(data==n))-min(fit.CR.fit(data==n))); end
+  fprintf(ofile,"\n\n");
+
+end
+%Global fit comparison output
+if(sum(strcmp(fit_run,"comp_CR"))==1)
+  if (fit.comp_CR.cvg==0)  fprintf(ofile,"Carver-Richards Global Fit MINIMIZATION DID NOT CONVERGE AFTER %i ITERATONS\n",iter_cr);
+  else
+    fprintf(ofile,"Carver-Richards Global Fit Converged after %i iterations\n",fit.comp_CR.iter);
+    fprintf(ofile,"data points %i\t\t model parameters %i \n",fit.comp_CR.npoints,fit.comp_CR.param);
+    fprintf(ofile,"CR r^2 %f\t\tchi^2 %f\t\tSD %f\t\tAIC %f\n",fit.comp_CR.r2,fit.comp_CR.chi2,fit.comp_CR.SD,fit.comp_CR.AIC);
+    fprintf(ofile,"------------------------------------------------------------\n");
+    for n=1:max(comp_group) fprintf(ofile,"PAR_CR_GLOBAL   PA\t\t%i  %8.2f  +/- %6.3f\n",n,100*fit.comp_CR.par_opt(fit.comp_CR.beg_PA+n),100*sqrt(fit.comp_CR.covp(fit.comp_CR.beg_PA+n,fit.comp_CR.beg_PA+n))); end
+    for n=1:max(comp_group) fprintf(ofile,"PAR_CR_GLOBAL   kex\t%i %8.2f  +/- %6.3f Hz\n",n,fit.comp_CR.par_opt(fit.comp_CR.beg_kex+n),sqrt(fit.comp_CR.covp(fit.comp_CR.beg_kex+n,fit.comp_CR.beg_kex+n))); end
+    for n=1:max(atom)  fprintf(ofile,"PAR_CR_GLOBAL   dw\t\t%i  %8.2f  +/- %6.3f ppm\n",n,fit.comp_CR.par_opt(fit.comp_CR.beg_dw+n),sqrt(fit.comp_CR.covp(fit.comp_CR.beg_dw+n,fit.comp_CR.beg_dw+n))); end
+    for n=1:max(data)  fprintf(ofile,"PAR_CR_GLOBAL   R20\t%i %8.2f  +/- %6.3f Hz\n",n,fit.comp_CR.par_opt(n),sqrt(fit.comp_CR.covp(n,n))); end
+    fprintf(ofile,"\n");
+    for n=1:max(data) fprintf(ofile,"DAT_CR_GLOBAL   Rex\t%i %8.2f   Hz\n",n,max(fit.comp_CR.fit(data==n))-min(fit.comp_CR.fit(data==n))); end
+  end
+  fprintf(ofile,"\n\n");
+end
+% Slow Equation output
+if(sum(strcmp(fit_run,"slow"))==1)
+  if (fit.slow.cvg==0)  fprintf(ofile,"Slow Fit MINIMIZATION DID NOT CONVERGE AFTER %i ITERATONS\n",iter_cr);
+  else
+    fprintf(ofile,"Slow Fit Converged after %i iterations\n",fit.slow.iter);
+    fprintf(ofile,"data points %i\t\t model parameters %i \n",fit.slow.npoints,fit.slow.param);
+    fprintf(ofile,"Slow r^2 %f\t\tchi^2 %f\t\tSD %f\t\tAIC %f\n",fit.slow.r2,fit.slow.chi2,fit.slow.SD,fit.slow.AIC);
+    fprintf(ofile,"------------------------------------------------------------\n");
+    for n=1:max(group) fprintf(ofile,"PAR_SLOW   ka\t\t%i %8.2f  +/- %6.3f Hz\n",n,fit.slow.par_opt(fit.slow.beg_ka+n),sqrt(fit.CR.covp(fit.slow.beg_ka+n,fit.slow.beg_ka+n))); end
+    for n=1:max(atom)  fprintf(ofile,"PAR_SLOW   dw\t\t%i  %8.2f  +/- %6.3f ppm\n",n,fit.slow.par_opt(fit.slow.beg_dw+n),sqrt(fit.slow.covp(fit.slow.beg_dw+n,fit.slow.beg_dw+n))); end
+    for n=1:max(data)  fprintf(ofile,"PAR_SLOW   R20\t%i %8.2f  +/- %6.3f Hz\n",n,fit.slow.par_opt(n),sqrt(fit.slow.covp(n,n))); end
+    fprintf(ofile,"\n");
+    for n=1:max(data) fprintf(ofile,"DAT_SLOW   Rex\t%i %8.2f   Hz\n",n,max(fit.slow.fit(data==n))-min(fit.slow.fit(data==n))); end
+  end
+  fprintf(ofile,"\n\n");
+end
+% Fast Equation output
+if(sum(strcmp(fit_run,"fast"))==1)
+  if (fit.fast.cvg==0)  fprintf(ofile,"Fast Fit MINIMIZATION DID NOT CONVERGE AFTER %i ITERATONS\n",iter_cr);
+  else
+    fprintf(ofile,"Fast Fit Converged after %i iterations\n",fit.fast.iter);
+    fprintf(ofile,"data points %i\t\t model parameters %i \n",fit.fast.npoints,fit.fast.param);
+    fprintf(ofile,"Fast r^2 %f\t\tchi^2 %f\t\tSD %f\t\tAIC %f\n",fit.fast.r2,fit.fast.chi2,fit.fast.SD,fit.fast.AIC);
+    fprintf(ofile,"------------------------------------------------------------\n");
+    for n=1:max(group) fprintf(ofile,"PAR_FAST   kex\t\t%i %8.2f  +/- %6.3f Hz\n",n,fit.fast.par_opt(fit.fast.beg_kex+n),sqrt(fit.CR.covp(fit.fast.beg_kex+n,fit.fast.beg_kex+n))); end
+    for n=1:max(atom)  fprintf(ofile,"PAR_FAST   PPdw\t\t%i  %8.2f  +/- %6.3f ppm\n",n,fit.fast.par_opt(fit.fast.beg_dw+n),sqrt(fit.fast.covp(fit.fast.beg_dw+n,fit.fast.beg_dw+n))); end
+    for n=1:max(data)  fprintf(ofile,"PAR_FAST   R20\t%i %8.2f  +/- %6.3f Hz\n",n,fit.fast.par_opt(n),sqrt(fit.fast.covp(n,n))); end
+    fprintf(ofile,"\n");
+    for n=1:max(data) fprintf(ofile,"DAT_FAST   Rex\t%i %8.2f   Hz\n",n,max(fit.fast.fit(data==n))-min(fit.fast.fit(data==n))); end
+  end
+  fprintf(ofile,"\n\n");
+end
+
+%%Input Summary
+fprintf(ofile,"Input Parameters\n");
+fprintf(ofile,"------------------------------------------------------------\n");
+fprintf(ofile,"Data Files (%i)\n",max(data));
+for n=1:max(data) fprintf(ofile,"\tDF\t%i\t%s\t%i\t%i\t%i\t%s\n",n,data_file(n,:),temp_in(n),d_field(n),res_in(n),atom_type(n)); end
+fprintf(ofile,"Atoms (%i)\n",max(atom));
+for n=1:max(atom) 
+  fprintf(ofile,"\tATOM\t%i\t\tData Files: ",n); 
+  dft=ints_in(data(atom==n));
+  for m=1:size(dft,2)-1 
+    fprintf(ofile,"%i\t",dft(m));
+  end
+  fprintf(ofile,"%i\n",max(dft));
+end
+fprintf(ofile,"Groups (%i)\n",max(group));
+for n=1:max(group)
+  fprintf(ofile,"\tGROUP\t%i\t\tData Files: ",n);                                          
+  dft=ints_in(data(group==n));
+  for m=1:size(dft,2)-1
+    fprintf(ofile,"%i\t",dft(m));
+  end
+  fprintf(ofile,"%i\n",max(dft));
+end
+if(size(fit_run,2)>1) fprintf(ofile,"OPTIONS\n"); end
+for n=2:size(fit_run,2) fprintf(ofile,"\tOPTION\t%s\n",fit.(fit_run(n)).tag); end
+if(fit_groups_separate) fprintf(ofile,"\tOPTION\tFIT_GROUPS_SEPARATE\n"); end 
+if(weight_val!=0) fprintf(ofile,"\tOPTION\tWEIGHTS\t%3.2f\n",weight_val); end
+fprintf(ofile,"WEIGHTS\n")
+for n=1:max(atom)
+  fprintf(ofile,"\tATOM\t%i\t%3.2f\n",n,weights(atom==n)(1));
+end
+
+
+fprintf(ofile,"\n\n");
+
+
+
+%%Print Initial Conditons and Bounds
+%CR
+fprintf(ofile,"Carver-Richards Initial Condtions - ");
+if(fit.CR.used_bound==0) fprintf(ofile,"Bounds Not Enforced For Fit\n"); else fprintf(ofile,"Bounds Enforced For Fit\n") end
+fprintf(ofile,"------------------------------------------------------------\n");
+for n=1:max(group) fprintf(ofile,"IC_CR   PA\t%i  %8.2f   %8.4g    %8.4g \n",n,fit.CR.IC(fit.CR.beg_PA+n),fit.CR.bounds(fit.CR.beg_PA+n,1),fit.CR.bounds(fit.CR.beg_PA+n,2)); end
+for n=1:max(group) fprintf(ofile,"IC_CR   kex\t%i  %8.2f   %8.4g    %8.4g \n",n,fit.CR.IC(fit.CR.beg_kex+n),fit.CR.bounds(fit.CR.beg_kex+n,1),fit.CR.bounds(fit.CR.beg_kex+n,2)); end
+for n=1:max(atom) fprintf(ofile,"IC_CR   dw\t%i  %8.2f   %8.4g    %8.4g \n",n,fit.CR.IC(fit.CR.beg_dw+n),fit.CR.bounds(fit.CR.beg_dw+n,1),fit.CR.bounds(fit.CR.beg_dw+n,2)); end
+for n=1:max(data) fprintf(ofile,"IC_CR   R20\t%i  %8.2f   %8.4g    %8.4g \n",n,fit.CR.IC(n),fit.CR.bounds(n,1),fit.CR.bounds(n,2)); end
+fprintf(ofile,"\n\n");
+%CR Global
+if(sum(strcmp(fit_run,"comp_CR"))==1)
+  fprintf(ofile,"Carver-Richards Global Initial Condtions - ");
+  if(fit.comp_CR.used_bound==0) fprintf(ofile,"Bounds Not Enforced For Fit\n"); else fprintf(ofile,"Bounds Enforced For Fit\n") end
+  fprintf(ofile,"------------------------------------------------------------\n");
+  fprintf(ofile,"IC_CR_GLOBAL   PA\t%i  %8.4g   %8.4g    %8.4g \n",1,fit.comp_CR.IC(fit.comp_CR.beg_PA+1),fit.comp_CR.bounds(fit.comp_CR.beg_PA+1,1),fit.comp_CR.bounds(fit.comp_CR.beg_PA+1,2));
+  fprintf(ofile,"IC_CR_GLOBAL   kex\t%i  %8.4g   %8.4g    %8.4g \n",1,fit.comp_CR.IC(fit.comp_CR.beg_kex+1),fit.comp_CR.bounds(fit.comp_CR.beg_kex+1,1),fit.comp_CR.bounds(fit.comp_CR.beg_kex+1,2));
+  for n=1:max(atom) fprintf(ofile,"IC_CR_GLOBAL   dw\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.comp_CR.IC(fit.comp_CR.beg_dw+n),fit.comp_CR.bounds(fit.comp_CR.beg_dw+n,1),fit.comp_CR.bounds(fit.comp_CR.beg_dw+n,2)); end
+  for n=1:max(data) fprintf(ofile,"IC_CR_GLOBAL   R20\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.comp_CR.IC(n),fit.comp_CR.bounds(n,1),fit.comp_CR.bounds(n,2)); end
+fprintf(ofile,"\n\n");
+end
+%SLOW
+if(sum(strcmp(fit_run,"slow"))==1)
+  fprintf(ofile,"Slow Equation Initial Condtions - ");
+  if(fit.slow.used_bound==0) fprintf(ofile,"Bounds Not Enforced For Fit\n"); else fprintf(ofile,"Bounds Enforced For Fit\n") end
+  fprintf(ofile,"------------------------------------------------------------\n");
+  for n=1:max(group) fprintf(ofile,"IC_SLOW   ka\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.slow.IC(fit.slow.beg_ka+n),fit.slow.bounds(fit.slow.beg_ka+n,1),fit.slow.bounds(fit.slow.beg_ka+n,2)); end
+  for n=1:max(atom) fprintf(ofile,"IC_SLOW   dw\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.slow.IC(fit.slow.beg_dw+n),fit.slow.bounds(fit.slow.beg_dw+n,1),fit.slow.bounds(fit.slow.beg_dw+n,2)); end
+  for n=1:max(data) fprintf(ofile,"IC_SLOW   R20\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.slow.IC(n),fit.slow.bounds(n,1),fit.slow.bounds(n,2)); end
+  fprintf(ofile,"\n\n");
+end
+%FAST
+if(sum(strcmp(fit_run,"fast"))==1)
+  fprintf(ofile,"Fast Equation Initial Condtions - ");
+  if(fit.fast.used_bound==0) fprintf(ofile,"Bounds Not Enforced For Fit\n"); else fprintf(ofile,"Bounds Enforced For Fit\n") end
+  fprintf(ofile,"------------------------------------------------------------\n");
+  for n=1:max(group) fprintf(ofile,"IC_FAST   kex\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.fast.IC(fit.fast.beg_kex+n),fit.fast.bounds(fit.fast.beg_kex+n,1),fit.fast.bounds(fit.fast.beg_kex+n,2)); end
+  for n=1:max(atom) fprintf(ofile,"IC_FAST   PPdw\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.fast.IC(fit.fast.beg_dw+n),fit.fast.bounds(fit.fast.beg_dw+n,1),fit.fast.bounds(fit.fast.beg_dw+n,2)); end
+  for n=1:max(data) fprintf(ofile,"IC_FAST   R20\t%i  %8.4g   %8.4g    %8.4g \n",n,fit.fast.IC(n),fit.fast.bounds(n,1),fit.fast.bounds(n,2)); end
+  fprintf(ofile,"\n\n");
+end
+
+fclose(ifile);
+fclose(ofile);
